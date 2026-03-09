@@ -2,61 +2,99 @@ import express from "express";
 import "dotenv/config";
 import cors from "cors";
 import http from "http";
+import { Server } from "socket.io";
+
 import { connectDB } from "./lib/db.js";
 import userRouter from "./routes/userRoutes.js";
 import messageRouter from "./routes/messageRoutes.js";
-import { Server } from "socket.io";
-import { Socket } from "dgram";
 
-// Create express app using HTTP server
+// Express app
 const app = express();
+
+// Create HTTP server
 const server = http.createServer(app);
 
-
-// Initialize socket.io server
+// Socket.IO server
 export const io = new Server(server, {
-    cors:{origin:"*"}
-})
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000
+});
 
-// Store online users
-export const userSocketMap = {}; // {userId: socketId}
+// Store connected users
+export const userSocketMap = {}; // { userId: socketId }
 
-// Socket.io connection handler
-io.on("connection",(socket)=>{
-    const userId = socket.handshake.query.userId;
-    console.log("User Connected", userId);
+// Socket connection
+io.on("connection", (socket) => {
 
-    if(userId) userSocketMap[userId] = socket.id
+  const userId = socket.handshake.query.userId;
 
-    // Emit online users to all connected clients
-    io.emit("getOnlineUsers",Object.keys(userSocketMap));
+  console.log("User Connected:", userId, "Socket:", socket.id);
 
-    socket.on("disconnect",()=>{
-        console.log("User Disconnected",userId);
-        delete userSocketMap[userId];
-        io.emit("getOnlineUsers",Object.keys(userSocketMap))
-    })
-    
-})
+  if (userId) {
+    userSocketMap[userId] = socket.id;
+  }
 
-// Middleware setup
-app.use(express.json({limit:"4mb"}));
+  // Send online users to everyone
+  io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
+  // Handle sending messages
+  socket.on("sendMessage", (data) => {
+    const receiverSocketId = userSocketMap[data.receiverId];
+
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit("receiveMessage", data);
+    }
+  });
+
+  // Handle disconnect
+  socket.on("disconnect", () => {
+
+    console.log("User Disconnected:", userId);
+
+    if (userId) {
+      delete userSocketMap[userId];
+    }
+
+    io.emit("getOnlineUsers", Object.keys(userSocketMap));
+  });
+
+});
+
+
+// Middleware
+app.use(express.json({ limit: "4mb" }));
 app.use(cors());
 
-app.use("/api/status", (req,res) => res.send("Server is live"));
+// Health check route
+app.get("/api/status", (req, res) => {
+  res.send("Server is live");
+});
 
-// Routes setup
-app.use("/api/auth",userRouter);
-app.use("/api/messages",messageRouter);
+// API routes
+app.use("/api/auth", userRouter);
+app.use("/api/messages", messageRouter);
 
-// Connect to MongoDb
-await connectDB();
 
+// Start server
 const PORT = process.env.PORT || 5000;
 
-if (process.env.NODE_ENV !== "production") {
-    server.listen(PORT, ()=> console.log("Server is running on PORT: "+PORT));
-}
+const startServer = async () => {
+  try {
 
-// Export server for Vercel
-export default server;
+    await connectDB();
+    console.log("MongoDB Connected");
+
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+
+  } catch (error) {
+    console.error("Server start error:", error);
+  }
+};
+
+startServer();
