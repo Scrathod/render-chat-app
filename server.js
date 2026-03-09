@@ -7,82 +7,156 @@ import { Server } from "socket.io";
 import { connectDB } from "./lib/db.js";
 import userRouter from "./routes/userRoutes.js";
 import messageRouter from "./routes/messageRoutes.js";
+import User from "./models/User.js";
 
-// Express app
 const app = express();
-
-// Create HTTP server
 const server = http.createServer(app);
 
-// Socket.IO server
+// ================= SOCKET.IO =================
 export const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
   },
+  transports: ["websocket"],
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
 // Store connected users
-export const userSocketMap = {}; // { userId: socketId }
+export const userSocketMap = {}; // { userId : socketId }
 
-// Socket connection
-io.on("connection", (socket) => {
+
+// Helper function
+const emitToUser = (userId, event, data) => {
+  const socketId = userSocketMap[userId];
+  if (socketId) {
+    io.to(socketId).emit(event, data);
+  }
+};
+
+
+// ================= SOCKET CONNECTION =================
+io.on("connection", async (socket) => {
 
   const userId = socket.handshake.query.userId;
 
-  console.log("User Connected:", userId, "Socket:", socket.id);
+  if (!userId) return socket.disconnect();
 
-  if (userId) {
-    userSocketMap[userId] = socket.id;
-  }
+  console.log("User Connected:", userId, socket.id);
 
-  // Send online users to everyone
-  io.emit("getOnlineUsers", Object.keys(userSocketMap));
+  userSocketMap[userId] = socket.id;
 
-  // Handle sending messages
-  socket.on("sendMessage", (data) => {
-    const receiverSocketId = userSocketMap[data.receiverId];
-
-    if (receiverSocketId) {
-      io.to(receiverSocketId).emit("receiveMessage", data);
-    }
+  // Update online status
+  await User.findByIdAndUpdate(userId, {
+    isOnline: true
   });
 
-  // Handle disconnect
-  socket.on("disconnect", () => {
+  // Broadcast online users
+  io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
+
+  // ================= SEND MESSAGE =================
+  socket.on("sendMessage", (data) => {
+
+    emitToUser(data.receiverId, "receiveMessage", data);
+
+    // notify sender delivered
+    emitToUser(userId, "messageDelivered", {
+      messageId: data._id
+    });
+
+  });
+
+
+  // ================= TYPING =================
+  socket.on("typing", ({ receiverId }) => {
+
+    emitToUser(receiverId, "typing", {
+      senderId: userId
+    });
+
+  });
+
+
+  socket.on("stopTyping", ({ receiverId }) => {
+
+    emitToUser(receiverId, "stopTyping", {
+      senderId: userId
+    });
+
+  });
+
+
+  // ================= MESSAGE SEEN =================
+  socket.on("messageSeen", ({ senderId, messageId }) => {
+
+    emitToUser(senderId, "messageSeen", { messageId });
+
+  });
+
+
+  // ================= DELETE MESSAGE =================
+  socket.on("deleteMessage", ({ receiverId, messageId }) => {
+
+    emitToUser(receiverId, "messageDeleted", { messageId });
+
+  });
+
+
+  // ================= REACTION =================
+  socket.on("messageReaction", ({ receiverId, messageId, emoji }) => {
+
+    emitToUser(receiverId, "messageReaction", {
+      messageId,
+      emoji,
+      userId
+    });
+
+  });
+
+
+  // ================= DISCONNECT =================
+  socket.on("disconnect", async () => {
 
     console.log("User Disconnected:", userId);
 
-    if (userId) {
-      delete userSocketMap[userId];
-    }
+    delete userSocketMap[userId];
+
+    // Update last seen
+    await User.findByIdAndUpdate(userId, {
+      isOnline: false,
+      lastSeen: new Date()
+    });
 
     io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
   });
 
 });
 
 
-// Middleware
+// ================= MIDDLEWARE =================
 app.use(express.json({ limit: "4mb" }));
 app.use(cors());
 
-// Health check route
+
+// ================= HEALTH CHECK =================
 app.get("/api/status", (req, res) => {
   res.send("Server is live");
 });
 
-// API routes
+
+// ================= ROUTES =================
 app.use("/api/auth", userRouter);
 app.use("/api/messages", messageRouter);
 
 
-// Start server
+// ================= START SERVER =================
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
+
   try {
 
     await connectDB();
@@ -93,8 +167,11 @@ const startServer = async () => {
     });
 
   } catch (error) {
+
     console.error("Server start error:", error);
+
   }
+
 };
 
 startServer();
