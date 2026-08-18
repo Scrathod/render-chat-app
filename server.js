@@ -146,6 +146,13 @@ app.get("/api/status", (req, res) => {
   res.send("Server is live");
 });
 
+app.get("/health", (req, res) => {
+    res.status(200).json({
+        status: "UP",
+        message: "API Working"
+    });
+});
+
 
 // ================= ROUTES =================
 app.use("/api/auth", userRouter);
